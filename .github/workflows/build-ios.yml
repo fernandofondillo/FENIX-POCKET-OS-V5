@@ -1,5 +1,6 @@
 # GitHub Actions: Build iOS Fénix Pocket OS V5
 # Genera IPA sin firma (para distribución Ad Hoc con Sideloadly).
+# Patrón validado V4 (workflow 27363817859) + fix de CODE_SIGNING_ALLOWED=NO.
 
 name: Build iOS Fénix V5
 
@@ -11,6 +12,7 @@ on:
 jobs:
   build-ios:
     runs-on: macos-14
+    timeout-minutes: 25
 
     steps:
       - name: Checkout
@@ -28,6 +30,11 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Show Xcode version
+        run: |
+          xcodebuild -version
+          sw_vers
+
       - name: Install CocoaPods
         run: |
           sudo gem install cocoapods --no-document
@@ -35,37 +42,80 @@ jobs:
 
       - name: Verify iOS structure
         run: |
-          # El ios/ completo (Runner.xcworkspace, Info.plist, etc) está commiteado al repo
-          # desde V4 (workflow 27363817859). NO regenerarlo con `flutter create`.
-          echo "=== Verificando ios/ estructura ==="
+          echo "=== ios/ estructura ==="
           ls -la ios/
-          ls -la ios/Runner.xcworkspace/
-          cat ios/Runner/Info.plist | head -30
+          echo "=== Info.plist iOS target ==="
+          grep IPHONEOS_DEPLOYMENT_TARGET ios/Runner.xcodeproj/project.pbxproj | head -3
+          echo "=== Bundle ID ==="
+          grep PRODUCT_BUNDLE_IDENTIFIER ios/Runner.xcodeproj/project.pbxproj | head -1
 
-      - name: Install dependencies
-        run: |
-          flutter pub get
+      - name: Install Flutter dependencies
+        run: flutter pub get
 
-      - name: Build iOS unsigned
+      - name: pod install (explícito)
         run: |
-          # PATRÓN VALIDADO V4 (workflow 27363817859): usar `flutter build ipa --no-codesign`
-          # que archiva internamente y deja IPA en build/ios/ipa/*.ipa
-          # NO usar `flutter build ios --release --no-codesign` (deja .app parcial)
-          flutter build ipa --no-codesign --export-options-plist=ios/ExportOptions.plist 2>&1 | tail -30
-          echo "---"
-          ls -la build/ios/ipa/
+          # CRÍTICO: Flutter 3.44 + macos-14 a veces NO auto-ejecuta pod install
+          # cuando el workspace es custom. Forzamos ejecución explícita.
+          cd ios
+          pod install --repo-update
+          cd ..
+          echo "=== Podfile.lock generado ==="
+          ls -la ios/Podfile.lock
+          head -20 ios/Podfile.lock
 
-      - name: Copy IPA to workspace root
+      - name: Build iOS unsigned (xcodebuild directo)
         run: |
-          # El IPA ya está generado por `flutter build ipa`, solo copiarlo al root
-          # para que upload-artifact lo encuentre
-          cp build/ios/ipa/*.ipa fenix-pocket-os-v5-unsigned.ipa
+          # ESTRATEGIA: usar `xcodebuild` directo en vez de `flutter build ipa`
+          # porque nos da control total sobre los flags de signing.
+          # Flags CRÍTICOS:
+          #   CODE_SIGNING_ALLOWED=NO        → NO intente firmar con Apple Dev team
+          #   CODE_SIGN_IDENTITY=""          → sin identidad
+          #   CODE_SIGNING_REQUIRED=NO       → no requiere provisioning
+          #   DEVELOPMENT_TEAM=""            → sin team ID
+          # Patrón validado en playbook V4 (línea 124)
+          cd ios
+          xcodebuild \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            DEVELOPMENT_TEAM="" \
+            build 2>&1 | tail -50
+          cd ..
+
+      - name: Verify .app was built
+        run: |
+          echo "=== build/ios/Release-iphoneos/ ==="
+          ls -la build/ios/Release-iphoneos/ 2>/dev/null || \
+          echo "❌ no se generó .app en build/ios/Release-iphoneos/"
+          ls -la build/ios/iphoneos/ 2>/dev/null || \
+          echo "❌ no se generó .app en build/ios/iphoneos/"
+
+      - name: Package as IPA (correcto)
+        run: |
+          # Estructura IPA válida: Payload/Runner.app/...
+          # Buscar Runner.app en la ubicación real
+          RUNNER_APP=$(find build/ios -name "Runner.app" -type d | head -1)
+          if [ -z "$RUNNER_APP" ]; then
+            echo "❌ No se encontró Runner.app"
+            exit 1
+          fi
+          echo "✅ Runner.app encontrado en: $RUNNER_APP"
+          cd $(dirname "$RUNNER_APP")
+          rm -rf Payload
+          mkdir Payload
+          ditto Runner.app Payload/Runner.app
+          cd ..
+          zip -r ../../fenix-pocket-os-v5-unsigned.ipa Payload
+          cd ../..
           ls -la fenix-pocket-os-v5-unsigned.ipa
-          # Verificar estructura interna
           file fenix-pocket-os-v5-unsigned.ipa
-          unzip -l fenix-pocket-os-v5-unsigned.ipa 2>&1 | head -20
-          # Sanity check
-          unzip -l fenix-pocket-os-v5-unsigned.ipa 2>&1 | grep -q "Payload/Runner.app/Runner" && echo "✅ IPA OK" || echo "❌ IPA MAL"
+          unzip -l fenix-pocket-os-v5-unsigned.ipa | head -10
+          unzip -l fenix-pocket-os-v5-unsigned.ipa | grep -q "Payload/Runner.app/Runner" && echo "✅ IPA OK" || echo "❌ IPA MAL"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
