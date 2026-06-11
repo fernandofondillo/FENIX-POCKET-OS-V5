@@ -1,25 +1,32 @@
 // lib/models/payload_request.dart
+// Contrato de datos V5 hacia el backend A.G.O.S. (FastAPI/Pydantic).
+// Coincide snake_case estricto con ChatRequest en app/schemas/chat_schema.py.
 
-/// Representa la carga densa de información contextual efímera
-/// que el dispositivo móvil emitirá hacia el servidor VPS.
 class PayloadRequest {
-  /// Identificador anónimo del usuario (Zero-Knowledge UUID).
-  /// Fundamental para la segmentación Multi-Usuario en el Orquestador VPS.
+  /// ID anónimo del usuario (UUID v4 generado en onboarding).
   final String userId;
-  
-  /// El texto emitido por el usuario o extraído mediante Speech-to-Text.
+
+  /// El prompt terminal a inferir.
   final String mensajeActual;
-  
-  /// La instancia completa de la identidad base del usuario extraída de SQLite.
-  final Map<String, dynamic> perfilIdentidad;
-  
-  /// Fragmentos estructurados correspondientes a un sistema RAG local, si aplica.
-  final String contextoRagHibrido;
-  
-  /// Detalles de la cápsula de personalidad activa (Ej. "Entrenador", "Ingeniero").
+
+  /// String ultradenso del EAV SQLite renderizado por PerfilDbService.
+  /// Coincide con `perfil_identidad: str` en Pydantic.
+  final String perfilIdentidad;
+
+  /// RAG híbrido local: historial de usuario + conocimiento experto.
+  /// Coincide con `contexto_rag_hibrido: RagContext` en Pydantic.
+  final Map<String, String> contextoRagHibrido;
+
+  /// Detalles de la cápsula de personalidad activa.
+  /// Coincide con `capsula_activa: CapsulaActiva` en Pydantic.
   final Map<String, dynamic> capsulaActiva;
-  
-  /// Historial Fifo ultra-compacto y encriptado en reposo en el móvil de últimos comandos del chat
+
+  /// Skills globales actualmente conectadas al UI dinámico.
+  /// Coincide con `active_skills: List[str]` en Pydantic.
+  final List<String> activeSkills;
+
+  /// Cola FIFO de historial reciente (últimos 8 mensajes).
+  /// Coincide con `historial_reciente: List[Message]` en Pydantic.
   final List<Map<String, String>> historialReciente;
 
   PayloadRequest({
@@ -28,11 +35,11 @@ class PayloadRequest {
     required this.perfilIdentidad,
     required this.contextoRagHibrido,
     required this.capsulaActiva,
+    required this.activeSkills,
     required this.historialReciente,
   });
 
-  /// Transmuta el objeto a su representación Map en `snake_case` estricto
-  /// garantizando su integridad para FastAPI/Pydantic en backend.
+  /// Serializa el objeto a Map snake_case estricto, válido para FastAPI/Pydantic.
   Map<String, dynamic> toJson() {
     return {
       'user_id': userId,
@@ -40,6 +47,7 @@ class PayloadRequest {
       'perfil_identidad': perfilIdentidad,
       'contexto_rag_hibrido': contextoRagHibrido,
       'capsula_activa': capsulaActiva,
+      'active_skills': activeSkills,
       'historial_reciente': historialReciente,
     };
   }

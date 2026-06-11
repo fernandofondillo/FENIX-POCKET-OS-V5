@@ -1,102 +1,91 @@
 // lib/services/api_service.dart
+// Servicio HTTP hacia el backend A.G.O.S. (V5).
+// Implementa el flujo event-driven: POST /chat (HTTP 202 + task_id) → polling.
 
-import 'dart:convert';
 import 'dart:async';
+import 'dart:convert';
 import 'package:http/http.dart' as http;
+
+import '../core/app_config.dart';
 import '../models/payload_request.dart';
 
-/// Servicio robusto encargado de dialogar con el VPS backend bajo el nuevo paradigma
-/// de Arquitectura Orientada a Eventos (Redis + Arq).
 class ApiService {
-  final String _base_url;
+  final String _baseUrl;
 
-  ApiService({required String baseUrl}) : _base_url = baseUrl;
+  ApiService({String? baseUrl}) : _baseUrl = baseUrl ?? AppConfig.apiBaseUrl;
 
-  /// Envía el payload denso al Endpoint Ingestor No-Bloqueante (Event-Driven).
-  /// Captura el `task_id` y delega la responsabilidad a un ciclo automatizado de Long-Polling.
-  Future<Map<String, dynamic>> enviar_mensaje_con_polling(PayloadRequest payload) async {
-    final String url_ingesta = '$_base_url/api/v1/chat';
-    
-    print("[API_SERVICE] Despachando ráfaga hacia el Ingestor de VPS: $url_ingesta");
+  /// Despacha el payload denso al endpoint ingestor (HTTP 202 + task_id)
+  /// y delega la responsabilidad a un ciclo de long-polling cada 800ms.
+  Future<Map<String, dynamic>> enviarMensajeConPolling(PayloadRequest payload) async {
+    final String urlIngesta = '$_baseUrl/api/v1/chat';
+
+    print('[API_SERVICE] Despachando ráfaga → $urlIngesta');
 
     try {
-      final respuesta_ingesta = await http.post(
-        Uri.parse(url_ingesta),
-        headers: {'Content-Type': 'application/json; charset=UTF-8'},
+      final respIngesta = await http.post(
+        Uri.parse(urlIngesta),
+        headers: AppConfig.ngrokHeaders,
         body: jsonEncode(payload.toJson()),
-      );
+      ).timeout(const Duration(seconds: 15));
 
-      // El servidor de FastAPI nos debe responder con 202 (Accepted) y encolarlo
-      if (respuesta_ingesta.statusCode == 202) {
-        final Map<String, dynamic> datos_ingesta = jsonDecode(respuesta_ingesta.body);
-        
-        if (datos_ingesta['status'] == 'queued' && datos_ingesta.containsKey('task_id')) {
-          final String task_id = datos_ingesta['task_id'];
-          print("[API_SERVICE] Tarea encolada en Redis con éxito. Task ID: $task_id");
-          
-          return await _iniciar_bucle_de_polling_automata(task_id);
-        } else {
-           throw Exception("Respuesta anómala del ingestor 202: ${respuesta_ingesta.body}");
+      if (respIngesta.statusCode == 202) {
+        final Map<String, dynamic> datosIngesta = jsonDecode(respIngesta.body);
+        if (datosIngesta['status'] == 'queued' && datosIngesta.containsKey('task_id')) {
+          final String taskId = datosIngesta['task_id'];
+          print('[API_SERVICE] Tarea encolada. Task ID: $taskId');
+          return await _buclePolling(taskId);
         }
+        throw Exception('Respuesta anómala del ingestor 202: ${respIngesta.body}');
       } else {
-        throw Exception("Fallo en la comunicación principal. Código HTTP: ${respuesta_ingesta.statusCode}");
+        throw Exception('Fallo HTTP ${respIngesta.statusCode} en POST /chat: ${respIngesta.body}');
       }
-    } catch (excepcion_red) {
-      print("[API_SERVICE_ERROR] Error crítico en la transmisión del payload: $excepcion_red");
+    } catch (e) {
+      print('[API_SERVICE_ERROR] $e');
       rethrow;
     }
   }
 
-  /// Ejecuta un ciclo continuo de consultas de alta frecuencia cada 800ms limitando las requests
-  /// con un máximo de tiempo de espera (Timeout de 30 segundos)
-  /// para impedir la congelación de la promesa principal y recuperar el output del Worker procesado.
-  Future<Map<String, dynamic>> _iniciar_bucle_de_polling_automata(String taskId) async {
-    final String url_polling = '$_base_url/api/v1/task/$taskId';
-    final int intervalo_polling_ms = 800; // 800 milisegundos de frecuencia de interrogación
-    final int timeout_segundos = 30;     // Evita la congestión con bucles infinitos en el Frontend
-    
-    DateTime tiempo_inicio = DateTime.now();
+  /// Long-polling cada 800ms, timeout 90s (Qwen 7B CPU puede tardar 30-60s).
+  Future<Map<String, dynamic>> _buclePolling(String taskId) async {
+    final String urlPolling = '$_baseUrl/api/v1/task/$taskId';
+    final int intervaloMs = 800;
+    final int timeoutSeg = 90;
+
+    final DateTime t0 = DateTime.now();
+    int intento = 0;
 
     while (true) {
-      // 1. Condición de Evasión (Timeout)
-      if (DateTime.now().difference(tiempo_inicio).inSeconds > timeout_segundos) {
-         print("[API_SERVICE_TIMEOUT] Se excedió el tiempo máximo de espera para la tarea: $taskId");
-         throw Exception("Tiempo de espera agotado. El modelo del VPS está saturado o fuera de línea.");
+      if (DateTime.now().difference(t0).inSeconds > timeoutSeg) {
+        throw Exception('Timeout ${timeoutSeg}s esperando tarea $taskId. VPS saturado o Qwen fuera de línea.');
       }
 
       try {
-        final respuesta_polling = await http.get(Uri.parse(url_polling));
+        final resp = await http.get(Uri.parse(urlPolling), headers: AppConfig.ngrokHeaders)
+            .timeout(const Duration(seconds: 10));
 
-        if (respuesta_polling.statusCode == 200) {
-          final Map<String, dynamic> datos_polling = jsonDecode(respuesta_polling.body);
-          final String estado = datos_polling['status'];
+        if (resp.statusCode == 200) {
+          final Map<String, dynamic> data = jsonDecode(resp.body);
+          final String estado = data['status'];
 
-          // 2. Transmisión Completada
-          if (estado == 'completed' && datos_polling.containsKey('result')) {
-            print("[API_SERVICE] Tarea completada. Recepción encriptada entregada y borrada paralelamente en Servidor.");
-            return datos_polling['result'];
-          } 
-          // 3. Proceso en Continuo
-          else if (estado == 'processing' || estado == 'queued') {
-            // El modelo de IA local sigue evaluando parámetros, silenciamos el log de terminal.
-            // print("La Cápsula Fénix procesando entorno... (Estado actual: $estado)");
-          } 
-          // 4. Fallos desde Python
-          else if (estado == 'error') {
-             throw Exception("Error fatal en el Worker de Python para la Tarea (Arq): $taskId");
-          } else {
-            print("[API_SERVICE_WARNNING] Estado infra-estructural desconocido en el Polling: $estado");
+          if (estado == 'completed' && data.containsKey('result')) {
+            print('[API_SERVICE] ✅ Tarea $taskId completada (intento $intento)');
+            return data['result'] as Map<String, dynamic>;
+          } else if (estado == 'processing' || estado == 'queued') {
+            if (intento % 5 == 0) {
+              print('[API_SERVICE] [$intento] $estado...');
+            }
+          } else if (estado == 'error') {
+            throw Exception('Error en worker Arq para $taskId');
           }
         } else {
-          throw Exception("Fallo intermedio en el servicio de Long-Polling HTTP: ${respuesta_polling.statusCode}");
+          throw Exception('HTTP ${resp.statusCode} en GET /task/$taskId');
         }
-      } catch (excepcion_temporal) {
-        // En caso de que haya una interrupción temporal de red en un solo ciclo de polling
-        print("[API_SERVICE_REINTENTO] Fallo de red temporal evaluando el task $taskId: $excepcion_temporal");
+      } catch (e) {
+        print('[API_SERVICE_REINTENTO] $e');
       }
 
-      // 5. Suspensión del hilo asíncrono temporal para espaciar las requests a Hostinger.
-      await Future.delayed(Duration(milliseconds: intervalo_polling_ms));
+      intento++;
+      await Future.delayed(Duration(milliseconds: intervaloMs));
     }
   }
 }

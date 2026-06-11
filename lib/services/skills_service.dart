@@ -10,28 +10,31 @@ class SkillsService {
   final Dio _dio;
   static const String _historial_claves = 'skills_executed_history';
 
+  /// 5 skills built-in mandatorios del Repositorio Pydantic en servidor ASGI.
+  /// Accesible estáticamente: SkillsService.built_in.
+  static const List<String> built_in = [
+    'agenda_crear',
+    'notificacion_enviar',
+    'web_search',
+    'memoria_recordar',
+    'memoria_olvidar',
+  ];
+
   // Inyección del Cliente Dio bajo BaseOptions nativo del Framework.
-  SkillsService({required String baseUrl}) 
+  SkillsService({String? baseUrl})
       : _dio = Dio(BaseOptions(
-          baseUrl: baseUrl, 
+          baseUrl: baseUrl ?? 'https://roguish-degradedly-anjelica.ngrok-free.dev',
           connectTimeout: const Duration(seconds: 15),
           receiveTimeout: const Duration(seconds: 30)
-        )) {
-    // Intercepción visual de Consola Opcional. No rompe abstracción.
-    // _dio.interceptors.add(LogInterceptor(responseBody: true));
+        ));
+
+  /// Inicializador opcional. Carga SharedPreferences para el historial.
+  Future<void> init() async {
+    await SharedPreferences.getInstance();
   }
 
   /// 1. Listar Habilidades Dinámicamente según la Cápsula o System Directive
   List<String> listar_habilidades_permitidas(List<String> allowed_skills) {
-    // 5 Built-in mandatorios del Repositorio Pydantic en servidor ASGI
-    const built_in = [
-      'agenda_crear',
-      'notificacion_enviar',
-      'web_search',
-      'memoria_recordar',
-      'memoria_olvidar'
-    ];
-    
     // Filtro relacional en Dart Core (O(N))
     final disponibles = built_in.where((skill) => allowed_skills.contains(skill)).toList();
     _logger.i('[SKILLS_SERVICE] Handshake de cruce listo. Autorizadas: $disponibles');
