@@ -52,25 +52,34 @@ jobs:
 
       - name: Package as IPA
         run: |
+          set -x
           # Estructura IPA correcta: Payload/Runner.app/...
           # CRÍTICO: 
           #   1. zip desde el PADRE de Payload/, no desde dentro
           #   2. usar `ditto` en lugar de `cp -R` (BSD no preserva bundles .app correctamente)
+          echo "=== STEP 1: verifying Runner.app exists ==="
+          ls -la build/ios/iphoneos/ 2>&1
+          ls -la build/ios/iphoneos/Runner.app/ 2>&1 | head -20
+          echo "=== STEP 2: creating Payload ==="
           cd build/ios/iphoneos
           rm -rf Payload
           mkdir Payload
           ditto Runner.app Payload/Runner.app
+          echo "=== STEP 3: verify copy ==="
+          ls -la Payload/Runner.app/ | head -10
+          echo "=== STEP 4: zip from parent ==="
           cd ..
-          # zip con quiet flag (-q) para evitar stderr noise
-          zip -r -q ../../fenix-pocket-os-v5-unsigned.ipa Payload
-          echo "---"
+          pwd
+          ls -la
+          zip -r ../../fenix-pocket-os-v5-unsigned.ipa Payload
+          echo "=== STEP 5: verify IPA ==="
           ls -la ../../fenix-pocket-os-v5-unsigned.ipa
-          echo "---"
-          # Verificar estructura interna del IPA
-          unzip -l ../../fenix-pocket-os-v5-unsigned.ipa | head -15
-          echo "---"
-          # Sanity check: el IPA debe contener Payload/Runner.app/Runner
-          unzip -l ../../fenix-pocket-os-v5-unsigned.ipa | grep -q "Payload/Runner.app/Runner" && echo "✅ IPA OK: contiene Payload/Runner.app/Runner" || echo "❌ IPA MAL: falta Payload/Runner.app/Runner"
+          file ../../fenix-pocket-os-v5-unsigned.ipa
+          echo "=== STEP 6: contents ==="
+          unzip -l ../../fenix-pocket-os-v5-unsigned.ipa 2>&1 | head -30
+          echo "=== STEP 7: sanity check ==="
+          unzip -l ../../fenix-pocket-os-v5-unsigned.ipa 2>&1 | grep -q "Payload/Runner.app/Runner" && echo "✅ IPA OK" || echo "❌ IPA MAL"
+          set +x
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
