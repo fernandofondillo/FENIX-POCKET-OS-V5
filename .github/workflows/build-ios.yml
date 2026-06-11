@@ -95,27 +95,42 @@ jobs:
           ls -la build/ios/iphoneos/ 2>/dev/null || \
           echo "❌ no se generó .app en build/ios/iphoneos/"
 
-      - name: Package as IPA (correcto)
+      - name: Package as IPA (correcto, v2)
         run: |
-          # Estructura IPA válida: Payload/Runner.app/...
-          # Buscar Runner.app en la ubicación real
-          RUNNER_APP=$(find build/ios -name "Runner.app" -type d | head -1)
+          # Estrategia robusta: usar find con -print0 y rutas absolutas
+          # El .app puede estar en build/ios/Release-iphoneos/Runner.app
+          #                    o build/ios/iphoneos/Runner.app
+          set -e
+          echo "=== Buscando Runner.app ==="
+          find build/ios -name "Runner.app" -type d 2>/dev/null
+          RUNNER_APP=$(find build/ios -name "Runner.app" -type d 2>/dev/null | head -1)
           if [ -z "$RUNNER_APP" ]; then
             echo "❌ No se encontró Runner.app"
             exit 1
           fi
-          echo "✅ Runner.app encontrado en: $RUNNER_APP"
-          cd $(dirname "$RUNNER_APP")
+          echo "✅ Runner.app en: $RUNNER_APP"
+          # Convertir a ruta absoluta
+          RUNNER_APP_ABS=$(cd "$(dirname "$RUNNER_APP")" && pwd)/$(basename "$RUNNER_APP")
+          echo "✅ Ruta absoluta: $RUNNER_APP_ABS"
+          # Crear Payload/ en el WORKSPACE ROOT (no dentro de build/)
           rm -rf Payload
-          mkdir Payload
-          ditto Runner.app Payload/Runner.app
-          cd ..
-          zip -r ../../fenix-pocket-os-v5-unsigned.ipa Payload
-          cd ../..
+          mkdir -p Payload
+          # Copiar con ditto (BSD-safe, preserva metadata iOS)
+          ditto "$RUNNER_APP_ABS" "Payload/Runner.app"
+          echo "=== Payload/Runner.app estructura ==="
+          ls -la Payload/Runner.app/ | head -10
+          echo "=== Empaquetando IPA desde el workspace root ==="
+          zip -r fenix-pocket-os-v5-unsigned.ipa Payload
+          echo "=== Verificación final ==="
           ls -la fenix-pocket-os-v5-unsigned.ipa
           file fenix-pocket-os-v5-unsigned.ipa
-          unzip -l fenix-pocket-os-v5-unsigned.ipa | head -10
-          unzip -l fenix-pocket-os-v5-unsigned.ipa | grep -q "Payload/Runner.app/Runner" && echo "✅ IPA OK" || echo "❌ IPA MAL"
+          unzip -l fenix-pocket-os-v5-unsigned.ipa | head -15
+          if unzip -l fenix-pocket-os-v5-unsigned.ipa | grep -q "Payload/Runner.app/Runner"; then
+            echo "✅ IPA VÁLIDO"
+          else
+            echo "❌ IPA MAL ARMADO"
+            exit 1
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
