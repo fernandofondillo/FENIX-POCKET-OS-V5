@@ -33,13 +33,14 @@ jobs:
           sudo gem install cocoapods --no-document
           pod --version
 
-      - name: Generate native iOS structure
+      - name: Verify iOS structure
         run: |
-          # Si ios/ no existe, generarlo
-          if [ ! -d "ios" ]; then
-            echo "Regenerando andamiaje iOS..."
-            flutter create --platforms ios .
-          fi
+          # El ios/ completo (Runner.xcworkspace, Info.plist, etc) está commiteado al repo
+          # desde V4 (workflow 27363817859). NO regenerarlo con `flutter create`.
+          echo "=== Verificando ios/ estructura ==="
+          ls -la ios/
+          ls -la ios/Runner.xcworkspace/
+          cat ios/Runner/Info.plist | head -30
 
       - name: Install dependencies
         run: |
