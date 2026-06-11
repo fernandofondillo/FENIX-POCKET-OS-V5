@@ -47,39 +47,24 @@ jobs:
 
       - name: Build iOS unsigned
         run: |
-          flutter build ios --release --no-codesign 2>&1 | tail -30
-          ls -la build/ios/iphoneos/
+          # PATRÓN VALIDADO V4 (workflow 27363817859): usar `flutter build ipa --no-codesign`
+          # que archiva internamente y deja IPA en build/ios/ipa/*.ipa
+          # NO usar `flutter build ios --release --no-codesign` (deja .app parcial)
+          flutter build ipa --no-codesign --export-options-plist=ios/ExportOptions.plist 2>&1 | tail -30
+          echo "---"
+          ls -la build/ios/ipa/
 
-      - name: Package as IPA
+      - name: Copy IPA to workspace root
         run: |
-          set -x
-          # Estructura IPA correcta: Payload/Runner.app/...
-          # CRÍTICO: 
-          #   1. zip desde el PADRE de Payload/, no desde dentro
-          #   2. usar `ditto` en lugar de `cp -R` (BSD no preserva bundles .app correctamente)
-          echo "=== STEP 1: verifying Runner.app exists ==="
-          ls -la build/ios/iphoneos/ 2>&1
-          ls -la build/ios/iphoneos/Runner.app/ 2>&1 | head -20
-          echo "=== STEP 2: creating Payload ==="
-          cd build/ios/iphoneos
-          rm -rf Payload
-          mkdir Payload
-          ditto Runner.app Payload/Runner.app
-          echo "=== STEP 3: verify copy ==="
-          ls -la Payload/Runner.app/ | head -10
-          echo "=== STEP 4: zip from parent ==="
-          cd ..
-          pwd
-          ls -la
-          zip -r ../../fenix-pocket-os-v5-unsigned.ipa Payload
-          echo "=== STEP 5: verify IPA ==="
-          ls -la ../../fenix-pocket-os-v5-unsigned.ipa
-          file ../../fenix-pocket-os-v5-unsigned.ipa
-          echo "=== STEP 6: contents ==="
-          unzip -l ../../fenix-pocket-os-v5-unsigned.ipa 2>&1 | head -30
-          echo "=== STEP 7: sanity check ==="
-          unzip -l ../../fenix-pocket-os-v5-unsigned.ipa 2>&1 | grep -q "Payload/Runner.app/Runner" && echo "✅ IPA OK" || echo "❌ IPA MAL"
-          set +x
+          # El IPA ya está generado por `flutter build ipa`, solo copiarlo al root
+          # para que upload-artifact lo encuentre
+          cp build/ios/ipa/*.ipa fenix-pocket-os-v5-unsigned.ipa
+          ls -la fenix-pocket-os-v5-unsigned.ipa
+          # Verificar estructura interna
+          file fenix-pocket-os-v5-unsigned.ipa
+          unzip -l fenix-pocket-os-v5-unsigned.ipa 2>&1 | head -20
+          # Sanity check
+          unzip -l fenix-pocket-os-v5-unsigned.ipa 2>&1 | grep -q "Payload/Runner.app/Runner" && echo "✅ IPA OK" || echo "❌ IPA MAL"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
