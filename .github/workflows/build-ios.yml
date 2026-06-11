@@ -52,12 +52,17 @@ jobs:
 
       - name: Package as IPA
         run: |
+          # Estructura IPA correcta: Payload/Runner.app/...
+          # CRÍTICO: zip debe ejecutarse desde el PADRE de Payload/, no desde dentro.
           cd build/ios/iphoneos
-          mkdir -p Payload
+          rm -rf Payload
+          mkdir Payload
           cp -R Runner.app Payload/
           cd ..
           zip -r ../../fenix-pocket-os-v5-unsigned.ipa Payload
           ls -la ../../fenix-pocket-os-v5-unsigned.ipa
+          # Verificar estructura interna del IPA
+          unzip -l ../../fenix-pocket-os-v5-unsigned.ipa | head -10
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
