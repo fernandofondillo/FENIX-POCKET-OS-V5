@@ -1,6 +1,15 @@
 # GitHub Actions: Build iOS Fénix Pocket OS V5
 # Genera IPA sin firma (para distribución Ad Hoc con Sideloadly).
-# Patrón validado V4 (workflow 27363817859) + fix de CODE_SIGNING_ALLOWED=NO.
+# Patrón validado V4 (workflow 27363817859) + auditoría externa 11-jun-2026.
+#
+# AUDITORÍA APLICADA (asesor externo, 11 jun 2026):
+# 1. set -eo pipefail + tee → xcodebuild FALLA se ve en log
+# 2. -derivedDataPath ../build/ios → output en lugar conocido
+# 3. find . -name Runner.app → búsqueda global para diagnosticar
+# 4. Validación con grep Payload/Runner.app (no /Runner) → match más amplio
+# 5. Verificación de Info.plist + binario ejecutable
+# 6. ditto -c -k en lugar de zip → Apple nativo, siempre disponible
+# 7. Upload xcodebuild.log como artifact en if failure
 
 name: Build iOS Fénix V5
 
@@ -56,6 +65,7 @@ jobs:
         run: |
           # CRÍTICO: Flutter 3.44 + macos-14 a veces NO auto-ejecuta pod install
           # cuando el workspace es custom. Forzamos ejecución explícita.
+          set -e
           cd ios
           pod install --repo-update
           cd ..
@@ -65,14 +75,10 @@ jobs:
 
       - name: Build iOS unsigned (xcodebuild directo)
         run: |
-          # ESTRATEGIA: usar `xcodebuild` directo en vez de `flutter build ipa`
-          # porque nos da control total sobre los flags de signing.
-          # Flags CRÍTICOS:
-          #   CODE_SIGNING_ALLOWED=NO        → NO intente firmar con Apple Dev team
-          #   CODE_SIGN_IDENTITY=""          → sin identidad
-          #   CODE_SIGNING_REQUIRED=NO       → no requiere provisioning
-          #   DEVELOPMENT_TEAM=""            → sin team ID
-          # Patrón validado en playbook V4 (línea 124)
+          # FIX auditoría #1: set -eo pipefail → errores NO se ocultan con tail
+          # FIX auditoría #2: -derivedDataPath ../build/ios → output en lugar conocido
+          # FIX auditoría #3: tee → log completo para debug
+          set -eo pipefail
           cd ios
           xcodebuild \
             -workspace Runner.xcworkspace \
@@ -80,61 +86,96 @@ jobs:
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
+            -derivedDataPath ../build/ios \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             DEVELOPMENT_TEAM="" \
-            build 2>&1 | tail -50
+            build | tee ../xcodebuild.log
           cd ..
+          echo "=== xcodebuild terminó con código $? ==="
+          # Si llegamos aquí, xcodebuild fue EXITOSO
+          echo "✅ xcodebuild build OK"
 
       - name: Verify .app was built
         run: |
-          echo "=== build/ios/Release-iphoneos/ ==="
-          ls -la build/ios/Release-iphoneos/ 2>/dev/null || \
-          echo "❌ no se generó .app en build/ios/Release-iphoneos/"
-          ls -la build/ios/iphoneos/ 2>/dev/null || \
-          echo "❌ no se generó .app en build/ios/iphoneos/"
+          # FIX auditoría #3: buscar Runner.app GLOBALMENTE (no solo en build/ios)
+          echo "=== Buscando Runner.app en TODO el repo ==="
+          find . -name "Runner.app" -type d 2>/dev/null | head -5
+          echo "=== Buscando específicamente en build/ios ==="
+          find build/ios -name "Runner.app" -type d 2>/dev/null | head -5
+          echo "=== Contenido de build/ios/ si existe ==="
+          ls -la build/ios/ 2>/dev/null | head -10 || echo "no existe build/ios/"
+          echo "=== Build/Products si existe ==="
+          ls -la build/ios/Build/Products/ 2>/dev/null | head -10 || echo "no existe build/ios/Build/Products/"
 
-      - name: Package as IPA (correcto, v2)
+      - name: Package as IPA (correcto, v3 con auditoría)
         run: |
-          # Estrategia robusta: usar find con -print0 y rutas absolutas
-          # El .app puede estar en build/ios/Release-iphoneos/Runner.app
-          #                    o build/ios/iphoneos/Runner.app
-          set -e
-          echo "=== Buscando Runner.app ==="
-          find build/ios -name "Runner.app" -type d 2>/dev/null
-          RUNNER_APP=$(find build/ios -name "Runner.app" -type d 2>/dev/null | head -1)
+          # FIX auditoría #3+5: buscar globalmente, verificar binario
+          set -eo pipefail
+          echo "=== Paso 1: buscar Runner.app globalmente ==="
+          find . -name "Runner.app" -type d 2>/dev/null
+          RUNNER_APP=$(find . -name "Runner.app" -type d 2>/dev/null | head -1)
           if [ -z "$RUNNER_APP" ]; then
-            echo "❌ No se encontró Runner.app"
+            echo "❌ No se encontró Runner.app en ningún lugar"
             exit 1
           fi
           echo "✅ Runner.app en: $RUNNER_APP"
           # Convertir a ruta absoluta
           RUNNER_APP_ABS=$(cd "$(dirname "$RUNNER_APP")" && pwd)/$(basename "$RUNNER_APP")
           echo "✅ Ruta absoluta: $RUNNER_APP_ABS"
-          # Crear Payload/ en el WORKSPACE ROOT (no dentro de build/)
+
+          # FIX auditoría #5: verificar Info.plist + binario ejecutable
+          echo "=== Verificación Info.plist ==="
+          plutil -p "$RUNNER_APP_ABS/Info.plist" | head -20
+          EXEC=$(defaults read "$RUNNER_APP_ABS/Info" CFBundleExecutable)
+          echo "✅ CFBundleExecutable: $EXEC"
+          ls -la "$RUNNER_APP_ABS/$EXEC"
+          if [ ! -f "$RUNNER_APP_ABS/$EXEC" ]; then
+            echo "❌ No se encontró el binario ejecutable $EXEC"
+            exit 1
+          fi
+          file "$RUNNER_APP_ABS/$EXEC"
+
+          # Estructura IPA: Payload/Runner.app/... en RAÍZ del ZIP
+          echo "=== Paso 2: crear Payload/ y copiar con ditto ==="
           rm -rf Payload
           mkdir -p Payload
-          # Copiar con ditto (BSD-safe, preserva metadata iOS)
+          # ditto preserva metadata iOS (BSD-safe, mejor que cp -R)
           ditto "$RUNNER_APP_ABS" "Payload/Runner.app"
           echo "=== Payload/Runner.app estructura ==="
           ls -la Payload/Runner.app/ | head -10
-          echo "=== Empaquetando IPA desde el workspace root ==="
-          zip -r fenix-pocket-os-v5-unsigned.ipa Payload
+          ls -la Payload/Runner.app/$EXEC
+
+          # FIX auditoría #6: usar ditto -c -k en lugar de zip
+          # ditto es Apple nativo, siempre disponible en macOS
+          echo "=== Paso 3: empaquetar IPA con ditto -c -k ==="
+          ditto -c -k --sequesterRsrc --keepParent Payload fenix-pocket-os-v5-unsigned.ipa
           echo "=== Verificación final ==="
           ls -la fenix-pocket-os-v5-unsigned.ipa
           file fenix-pocket-os-v5-unsigned.ipa
+          echo "=== Contenido del IPA ==="
           unzip -l fenix-pocket-os-v5-unsigned.ipa | head -15
-          if unzip -l fenix-pocket-os-v5-unsigned.ipa | grep -q "Payload/Runner.app/Runner"; then
+
+          # FIX auditoría #4: validar con grep Payload/Runner.app (no /Runner)
+          if unzip -l fenix-pocket-os-v5-unsigned.ipa | grep -q "Payload/Runner.app/"; then
             echo "✅ IPA VÁLIDO"
           else
-            echo "❌ IPA MAL ARMADO"
+            echo "❌ IPA MAL ARMADO — no contiene Payload/Runner.app/"
             exit 1
           fi
 
-      - name: Upload artifact
+      - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
           name: fenix-pocket-os-v5-unsigned
           path: fenix-pocket-os-v5-unsigned.ipa
           if-no-files-found: error
+
+      - name: Upload xcodebuild log (debug, si falló el build)
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: xcodebuild-log
+          path: xcodebuild.log
+          if-no-files-found: ignore
